@@ -62,7 +62,7 @@ fn readTable(
     family: model.AddressFamily,
     stats: *procnet.ParseStats,
 ) !void {
-    const content = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(16 * 1024 * 1024)) catch |err| switch (err) {
+    const content = readProcFileAlloc(allocator, io, path, .limited(16 * 1024 * 1024)) catch |err| switch (err) {
         error.FileNotFound => return,
         error.AccessDenied, error.PermissionDenied => return,
         else => return err,
@@ -154,10 +154,22 @@ fn scanPid(
 fn readProcessName(allocator: std.mem.Allocator, io: std.Io, pid_name: []const u8) !?[]const u8 {
     const path = try std.fmt.allocPrint(allocator, "/proc/{s}/comm", .{pid_name});
     defer allocator.free(path);
-    const raw = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(4096)) catch return null;
+    const raw = readProcFileAlloc(allocator, io, path, .limited(4096)) catch return null;
     defer allocator.free(raw);
     const trimmed = std.mem.trim(u8, raw, "\n\r");
     return try allocator.dupe(u8, trimmed);
+}
+
+fn readProcFileAlloc(allocator: std.mem.Allocator, io: std.Io, path: []const u8, limit: std.Io.Limit) ![]u8 {
+    var file = try std.Io.Dir.openFileAbsolute(io, path, .{ .allow_directory = false });
+    defer file.close(io);
+
+    var buffer: [4096]u8 = undefined;
+    var reader = file.readerStreaming(io, &buffer);
+    return reader.interface.allocRemaining(allocator, limit) catch |err| switch (err) {
+        error.ReadFailed => return reader.err.?,
+        else => |e| return e,
+    };
 }
 
 fn entryFromCandidate(candidate: Candidate, pid: ?u32, process_name: ?[]const u8) model.PortEntry {
