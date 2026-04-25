@@ -39,6 +39,10 @@ const DeliverySummary = struct {
     sent: usize = 0,
 };
 
+const RuntimeContext = struct {
+    scanner: backend.Scanner,
+};
+
 pub fn run(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -46,7 +50,18 @@ pub fn run(
     stderr: *std.Io.Writer,
     opts: cli.KillOptions,
 ) !KillResult {
-    var result = try backend.scan(allocator, io, .{ .port = opts.port, .protocol = opts.protocol });
+    return runWithScanner(backend.Scanner.platform(), allocator, io, stdout, stderr, opts);
+}
+
+pub fn runWithScanner(
+    scanner: backend.Scanner,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+    opts: cli.KillOptions,
+) !KillResult {
+    var result = try scanner.scan(allocator, io, .{ .port = opts.port, .protocol = opts.protocol });
     defer result.deinit();
 
     var plan = try planTargets(allocator, result.entries);
@@ -62,7 +77,7 @@ pub fn run(
         return .{ .code = .ok };
     }
 
-    var runtime_context: void = {};
+    var runtime_context: RuntimeContext = .{ .scanner = scanner };
     const runtime: KillRuntime = .{
         .context = &runtime_context,
         .signal = posixSignal,
@@ -186,7 +201,7 @@ fn posixSignal(_: *anyopaque, pid: u32, signal: std.posix.SIG) !void {
 }
 
 fn waitForPortRelease(
-    _: *anyopaque,
+    context: *anyopaque,
     io: std.Io,
     allocator: std.mem.Allocator,
     pids: []const u32,
@@ -194,23 +209,25 @@ fn waitForPortRelease(
     protocol: ?model.Protocol,
     wait_ms: u32,
 ) ![]u32 {
+    const runtime_context: *RuntimeContext = @ptrCast(@alignCast(context));
     var remaining: std.ArrayList(u32) = .empty;
     errdefer remaining.deinit(allocator);
 
     var elapsed: u32 = 0;
     while (elapsed < wait_ms) : (elapsed += 50) {
-        if (!try anyTargetStillHoldsPort(allocator, io, pids, port, protocol, null)) {
+        if (!try anyTargetStillHoldsPort(runtime_context.scanner, allocator, io, pids, port, protocol, null)) {
             return try remaining.toOwnedSlice(allocator);
         }
         const sleep_ms = @min(@as(u32, 50), wait_ms - elapsed);
         try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(sleep_ms), .awake);
     }
 
-    _ = try anyTargetStillHoldsPort(allocator, io, pids, port, protocol, &remaining);
+    _ = try anyTargetStillHoldsPort(runtime_context.scanner, allocator, io, pids, port, protocol, &remaining);
     return try remaining.toOwnedSlice(allocator);
 }
 
 fn anyTargetStillHoldsPort(
+    scanner: backend.Scanner,
     allocator: std.mem.Allocator,
     io: std.Io,
     pids: []const u32,
@@ -218,7 +235,7 @@ fn anyTargetStillHoldsPort(
     protocol: ?model.Protocol,
     remaining: ?*std.ArrayList(u32),
 ) !bool {
-    var result = try backend.scan(allocator, io, .{ .port = port, .protocol = protocol });
+    var result = try scanner.scan(allocator, io, .{ .port = port, .protocol = protocol });
     defer result.deinit();
     var seen = std.AutoHashMap(u32, void).init(allocator);
     defer seen.deinit();
@@ -306,6 +323,68 @@ test "survivors map to runtime failure after successful signal delivery" {
     try std.testing.expectEqual(cli.ExitCode.runtime, code);
     try std.testing.expectEqual(@as(usize, 1), fake.signal_calls);
     try std.testing.expectEqual(@as(usize, 1), fake.wait_calls);
+}
+
+test "kill dry-run uses scanner-owned filtering" {
+    const entries = [_]model.PortEntry{
+        .{
+            .protocol = .tcp,
+            .local_address = .{ .ipv4 = .{ 127, 0, 0, 1 } },
+            .local_port = 3000,
+            .pid = 42,
+            .process_name = "node",
+            .source = .{ .backend = .test_backend },
+        },
+        .{
+            .protocol = .tcp,
+            .local_address = .{ .ipv4 = .{ 127, 0, 0, 1 } },
+            .local_port = 4000,
+            .pid = 99,
+            .process_name = "other",
+            .source = .{ .backend = .test_backend },
+        },
+    };
+    const source: backend.SnapshotSource = .{ .snapshot = .{ .entries = &entries } };
+
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    var err = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer err.deinit();
+
+    const result = try runWithScanner(source.scanner(), std.testing.allocator, std.testing.io, &out.writer, &err.writer, .{
+        .port = 3000,
+        .dry_run = true,
+    });
+
+    try std.testing.expectEqual(cli.ExitCode.ok, result.code);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "127.0.0.1:3000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "127.0.0.1:4000") == null);
+    try std.testing.expectEqual(@as(usize, 0), err.written().len);
+}
+
+test "wait for port release uses scripted scanner snapshots" {
+    const pids = [_]u32{42};
+
+    const held = [_]model.PortEntry{.{
+        .protocol = .tcp,
+        .local_address = .{ .ipv4 = .{ 127, 0, 0, 1 } },
+        .local_port = 3000,
+        .pid = 42,
+        .process_name = "node",
+        .source = .{ .backend = .test_backend },
+    }};
+    const snapshots = [_]backend.Snapshot{
+        .{ .entries = &held },
+        .{ .entries = &.{} },
+    };
+    var source: backend.ScriptedSource = .{ .snapshots = &snapshots };
+    var runtime_context: RuntimeContext = .{ .scanner = source.scanner() };
+
+    const survivors = try waitForPortRelease(&runtime_context, std.testing.io, std.testing.allocator, &pids, 3000, .tcp, 100);
+    defer std.testing.allocator.free(survivors);
+
+    try std.testing.expectEqual(@as(usize, 0), survivors.len);
+    try std.testing.expectEqual(@as(usize, 2), source.index);
 }
 
 fn testEntry(pid: ?u32, name: []const u8) model.PortEntry {

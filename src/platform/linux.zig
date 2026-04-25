@@ -67,7 +67,6 @@ const ScanState = struct {
     fn toResult(self: *ScanState) !model.ScanResult {
         const owned = try self.entries.toOwnedSlice(self.allocator);
         self.entries_transferred = true;
-        model.sortEntries(owned);
         return .{ .allocator = self.allocator, .entries = owned, .stats = self.stats };
     }
 
