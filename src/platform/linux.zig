@@ -4,7 +4,7 @@ const procnet = @import("linux_procnet.zig");
 
 const Candidate = procnet.SocketCandidate;
 
-pub fn scan(allocator: std.mem.Allocator, io: std.Io, filter: model.ScanFilter) !model.ScanResult {
+pub fn scan(allocator: std.mem.Allocator, io: std.Io, filter_hint: model.ScanFilter) !model.ScanResult {
     var candidates: std.ArrayList(Candidate) = .empty;
     defer candidates.deinit(allocator);
     var stats: model.ScanStats = .{};
@@ -37,19 +37,18 @@ pub fn scan(allocator: std.mem.Allocator, io: std.Io, filter: model.ScanFilter) 
     var seen = std.AutoHashMap(u128, void).init(allocator);
     defer seen.deinit();
 
-    scanProc(allocator, io, filter, &inode_to_index, candidates.items, matched, &entries, &seen, &stats) catch |err| switch (err) {
+    scanProc(allocator, io, filter_hint, &inode_to_index, candidates.items, matched, &entries, &seen, &stats) catch |err| switch (err) {
         error.FileNotFound => {},
         else => return err,
     };
 
     for (candidates.items, 0..) |candidate, i| {
-        if (!matched[i] and filter.matches(entryFromCandidate(candidate, null, null))) {
+        if (!matched[i] and filter_hint.matches(entryFromCandidate(candidate, null, null))) {
             try entries.append(allocator, entryFromCandidate(candidate, null, null));
         }
     }
 
     const owned = try entries.toOwnedSlice(allocator);
-    model.sortEntries(owned);
     return .{ .allocator = allocator, .entries = owned, .stats = stats };
 }
 
@@ -74,7 +73,7 @@ fn readTable(
 fn scanProc(
     allocator: std.mem.Allocator,
     io: std.Io,
-    filter: model.ScanFilter,
+    filter_hint: model.ScanFilter,
     inode_to_index: *std.AutoHashMap(u64, usize),
     candidates: []const Candidate,
     matched: []bool,
@@ -89,7 +88,7 @@ fn scanProc(
     while (try it.next(io)) |entry| {
         if (!isNumeric(entry.name)) continue;
         const pid = std.fmt.parseInt(u32, entry.name, 10) catch continue;
-        try scanPid(allocator, io, entry.name, pid, filter, inode_to_index, candidates, matched, entries, seen, stats);
+        try scanPid(allocator, io, entry.name, pid, filter_hint, inode_to_index, candidates, matched, entries, seen, stats);
     }
 }
 
@@ -98,7 +97,7 @@ fn scanPid(
     io: std.Io,
     pid_name: []const u8,
     pid: u32,
-    filter: model.ScanFilter,
+    filter_hint: model.ScanFilter,
     inode_to_index: *std.AutoHashMap(u64, usize),
     candidates: []const Candidate,
     matched: []bool,
@@ -139,7 +138,7 @@ fn scanPid(
         const candidate_index = inode_to_index.get(inode) orelse continue;
         const candidate = candidates[candidate_index];
         const base_entry = entryFromCandidate(candidate, pid, null);
-        if (!filter.matches(base_entry)) continue;
+        if (!filter_hint.matches(base_entry)) continue;
 
         const key = (@as(u128, inode) << 32) | @as(u128, pid);
         const put = try seen.getOrPut(key);
