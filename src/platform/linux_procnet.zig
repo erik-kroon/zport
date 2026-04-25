@@ -9,8 +9,8 @@ pub const SocketCandidate = struct {
     raw_state: ?u8,
 };
 
-pub const ParseStats = struct {
-    parse_errors: usize = 0,
+pub const ParseDiagnostics = struct {
+    malformed_rows: usize = 0,
 };
 
 pub fn parseTable(
@@ -19,7 +19,7 @@ pub fn parseTable(
     content: []const u8,
     protocol: model.Protocol,
     family: model.AddressFamily,
-    stats: *ParseStats,
+    diagnostics: *ParseDiagnostics,
 ) !void {
     var lines = std.mem.splitScalar(u8, content, '\n');
     _ = lines.next();
@@ -30,7 +30,7 @@ pub fn parseTable(
             try out.append(allocator, candidate);
         } else |err| switch (err) {
             error.Skip => {},
-            error.Malformed => stats.parse_errors += 1,
+            error.Malformed => diagnostics.malformed_rows += 1,
         }
     }
 }
@@ -110,14 +110,14 @@ test "parses linux proc net rows" {
     ;
     var list: std.ArrayList(SocketCandidate) = .empty;
     defer list.deinit(std.testing.allocator);
-    var stats: ParseStats = .{};
-    try parseTable(std.testing.allocator, &list, fixture, .tcp, .ipv4, &stats);
+    var diagnostics: ParseDiagnostics = .{};
+    try parseTable(std.testing.allocator, &list, fixture, .tcp, .ipv4, &diagnostics);
 
     try std.testing.expectEqual(@as(usize, 1), list.items.len);
     try std.testing.expectEqual(@as(u16, 3000), list.items[0].port);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 127, 0, 0, 1 }, &list.items[0].address.ipv4);
     try std.testing.expectEqual(@as(u64, 123456), list.items[0].inode);
-    try std.testing.expectEqual(@as(usize, 0), stats.parse_errors);
+    try std.testing.expectEqual(@as(usize, 0), diagnostics.malformed_rows);
 }
 
 test "parses linux ipv6 proc address" {

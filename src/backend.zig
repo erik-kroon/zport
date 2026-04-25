@@ -4,7 +4,7 @@ const model = @import("model.zig");
 
 pub const Snapshot = struct {
     entries: []const model.PortEntry,
-    stats: model.ScanStats = .{},
+    diagnostics: model.ScanDiagnostics = .{},
 };
 
 pub const SnapshotSource = struct {
@@ -49,12 +49,12 @@ pub const Scanner = struct {
             .platform => {
                 var raw = try scanPlatform(allocator, io, filter);
                 defer raw.deinit();
-                return normalize(allocator, raw.entries, raw.stats, filter);
+                return normalize(allocator, raw.entries, raw.diagnostics, filter);
             },
-            .snapshot => |source| return normalize(allocator, source.snapshot.entries, source.snapshot.stats, filter),
+            .snapshot => |source| return normalize(allocator, source.snapshot.entries, source.snapshot.diagnostics, filter),
             .scripted => |source| {
                 const snapshot = source.next();
-                return normalize(allocator, snapshot.entries, snapshot.stats, filter);
+                return normalize(allocator, snapshot.entries, snapshot.diagnostics, filter);
             },
         }
     }
@@ -75,7 +75,7 @@ fn scanPlatform(allocator: std.mem.Allocator, io: std.Io, filter_hint: model.Sca
 fn normalize(
     allocator: std.mem.Allocator,
     entries: []const model.PortEntry,
-    stats: model.ScanStats,
+    diagnostics: model.ScanDiagnostics,
     filter: model.ScanFilter,
 ) !model.ScanResult {
     var normalized: std.ArrayList(model.PortEntry) = .empty;
@@ -95,7 +95,7 @@ fn normalize(
 
     const owned = try normalized.toOwnedSlice(allocator);
     model.sortEntries(owned);
-    return .{ .allocator = allocator, .entries = owned, .stats = stats };
+    return .{ .allocator = allocator, .entries = owned, .diagnostics = diagnostics };
 }
 
 fn cloneEntry(allocator: std.mem.Allocator, entry: model.PortEntry) !model.PortEntry {
@@ -131,7 +131,7 @@ test "scanner normalizes filtered sorted owned results" {
             .source = .{ .backend = .test_backend },
         },
     };
-    const source: SnapshotSource = .{ .snapshot = .{ .entries = &entries, .stats = .{ .parse_errors = 1 } } };
+    const source: SnapshotSource = .{ .snapshot = .{ .entries = &entries, .diagnostics = .{ .malformed_socket_rows = 1 } } };
 
     var result = try source.scanner().scan(std.testing.allocator, std.testing.io, .{ .protocol = .tcp });
     defer result.deinit();
@@ -139,6 +139,6 @@ test "scanner normalizes filtered sorted owned results" {
     try std.testing.expectEqual(@as(usize, 2), result.entries.len);
     try std.testing.expectEqual(@as(u16, 2000), result.entries[0].local_port);
     try std.testing.expectEqual(@as(u16, 3000), result.entries[1].local_port);
-    try std.testing.expectEqual(@as(usize, 1), result.stats.parse_errors);
+    try std.testing.expectEqual(@as(usize, 1), result.diagnostics.malformed_socket_rows);
     try std.testing.expect(result.entries[1].process_name.?.ptr != entries[1].process_name.?.ptr);
 }

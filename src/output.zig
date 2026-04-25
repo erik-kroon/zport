@@ -53,18 +53,13 @@ pub fn writeJson(writer: *std.Io.Writer, result: model.ScanResult) !void {
         } else {
             try writer.writeAll("null");
         }
-        try writer.print(",\"backend\":\"{s}\"", .{entry.source.backend.text()});
-        if (entry.source.fd) |fd| try writer.print(",\"fd\":{d}", .{fd});
-        if (entry.source.inode) |inode| try writer.print(",\"inode\":{d}", .{inode});
-        if (entry.source.raw_state) |state| try writer.print(",\"raw_state\":{d}", .{state});
         try writer.writeAll("}");
     }
-    try writer.writeAll("],\"stats\":{");
-    try writer.print("\"skipped_processes\":{d},\"skipped_fds\":{d},\"parse_errors\":{d},\"permission_errors\":{d}", .{
-        result.stats.skipped_processes,
-        result.stats.skipped_fds,
-        result.stats.parse_errors,
-        result.stats.permission_errors,
+    try writer.writeAll("],\"diagnostics\":{");
+    try writer.print("\"permission_denied_processes\":{d},\"permission_denied_fds\":{d},\"malformed_socket_rows\":{d}", .{
+        result.diagnostics.permission_denied_processes,
+        result.diagnostics.permission_denied_fds,
+        result.diagnostics.malformed_socket_rows,
     });
     try writer.writeAll("}}\n");
 }
@@ -139,10 +134,12 @@ test "writes json" {
     const result: model.ScanResult = .{
         .allocator = std.testing.allocator,
         .entries = &entries,
-        .stats = .{ .permission_errors = 1 },
+        .diagnostics = .{ .permission_denied_processes = 1 },
     };
 
     try writeJson(&aw.writer, result);
     try std.testing.expect(std.mem.indexOf(u8, aw.written(), "\"protocol\":\"udp\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, aw.written(), "mDNS\\\"Responder") != null);
+    try std.testing.expect(std.mem.indexOf(u8, aw.written(), "\"diagnostics\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, aw.written(), "\"inode\"") == null);
 }

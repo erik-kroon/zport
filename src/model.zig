@@ -59,21 +59,32 @@ pub const PortEntry = struct {
     source: BackendMeta,
 };
 
-pub const ScanStats = struct {
-    skipped_processes: usize = 0,
-    skipped_fds: usize = 0,
-    parse_errors: usize = 0,
-    permission_errors: usize = 0,
+pub const ScanDiagnostics = struct {
+    permission_denied_processes: usize = 0,
+    permission_denied_fds: usize = 0,
+    malformed_socket_rows: usize = 0,
 
-    pub fn hasPermissionGaps(self: ScanStats) bool {
-        return self.skipped_processes != 0 or self.permission_errors != 0;
+    pub fn noteProcessPermissionDenied(self: *ScanDiagnostics) void {
+        self.permission_denied_processes += 1;
+    }
+
+    pub fn noteFdPermissionDenied(self: *ScanDiagnostics) void {
+        self.permission_denied_fds += 1;
+    }
+
+    pub fn noteMalformedSocketRows(self: *ScanDiagnostics, count: usize) void {
+        self.malformed_socket_rows += count;
+    }
+
+    pub fn hasPermissionGaps(self: ScanDiagnostics) bool {
+        return self.permission_denied_processes != 0 or self.permission_denied_fds != 0;
     }
 };
 
 pub const ScanResult = struct {
     allocator: std.mem.Allocator,
     entries: []PortEntry,
-    stats: ScanStats = .{},
+    diagnostics: ScanDiagnostics = .{},
 
     pub fn deinit(self: *ScanResult) void {
         for (self.entries) |entry| {

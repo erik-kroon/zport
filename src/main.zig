@@ -74,8 +74,11 @@ fn runList(
         try output.writeJson(stdout, result);
     } else {
         try output.writeTable(stdout, result.entries, .{ .header = !opts.no_header });
-        if (result.stats.hasPermissionGaps()) {
-            try stderr.print("zport: skipped {d} processes due to permissions; run with sudo for complete results\n", .{result.stats.skipped_processes});
+        if (result.diagnostics.hasPermissionGaps()) {
+            try stderr.print("zport: skipped {d} processes and {d} file descriptors due to permissions; run with sudo for complete results\n", .{
+                result.diagnostics.permission_denied_processes,
+                result.diagnostics.permission_denied_fds,
+            });
         }
     }
 

@@ -21,8 +21,8 @@ const ScanState = struct {
     matched: []bool = &.{},
     entries: std.ArrayList(model.PortEntry) = .empty,
     seen: std.AutoHashMap(u128, void),
-    stats: model.ScanStats = .{},
-    parse_stats: procnet.ParseStats = .{},
+    diagnostics: model.ScanDiagnostics = .{},
+    parse_diagnostics: procnet.ParseDiagnostics = .{},
     entries_transferred: bool = false,
 
     const MatchedSocket = struct {
@@ -67,7 +67,11 @@ const ScanState = struct {
     fn toResult(self: *ScanState) !model.ScanResult {
         const owned = try self.entries.toOwnedSlice(self.allocator);
         self.entries_transferred = true;
-        return .{ .allocator = self.allocator, .entries = owned, .stats = self.stats };
+        return .{
+            .allocator = self.allocator,
+            .entries = owned,
+            .diagnostics = self.diagnostics,
+        };
     }
 
     fn readTables(self: *ScanState) !void {
@@ -75,7 +79,7 @@ const ScanState = struct {
         try self.readTable("/proc/net/tcp6", .tcp, .ipv6);
         try self.readTable("/proc/net/udp", .udp, .ipv4);
         try self.readTable("/proc/net/udp6", .udp, .ipv6);
-        self.stats.parse_errors = self.parse_stats.parse_errors;
+        self.diagnostics.noteMalformedSocketRows(self.parse_diagnostics.malformed_rows);
     }
 
     fn readTable(
@@ -90,7 +94,7 @@ const ScanState = struct {
             else => return err,
         };
         defer self.allocator.free(content);
-        try procnet.parseTable(self.allocator, &self.candidates, content, protocol, family, &self.parse_stats);
+        try procnet.parseTable(self.allocator, &self.candidates, content, protocol, family, &self.parse_diagnostics);
     }
 
     fn indexCandidates(self: *ScanState) !void {
@@ -123,8 +127,7 @@ const ScanState = struct {
         var fd_dir = std.Io.Dir.openDirAbsolute(self.io, fd_path, .{ .iterate = true }) catch |err| switch (err) {
             error.FileNotFound => return,
             error.AccessDenied, error.PermissionDenied => {
-                self.stats.skipped_processes += 1;
-                self.stats.permission_errors += 1;
+                self.diagnostics.noteProcessPermissionDenied();
                 return;
             },
             else => return err,
@@ -140,7 +143,7 @@ const ScanState = struct {
             const link_len = fd_dir.readLink(self.io, fd_entry.name, &link_buf) catch |err| switch (err) {
                 error.FileNotFound => continue,
                 error.AccessDenied, error.PermissionDenied => {
-                    self.stats.skipped_fds += 1;
+                    self.diagnostics.noteFdPermissionDenied();
                     continue;
                 },
                 else => continue,
