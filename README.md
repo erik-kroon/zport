@@ -23,6 +23,14 @@ Use a custom release version with:
 zig build -Dversion=1.0.0 -Doptimize=ReleaseFast
 ```
 
+## Test
+
+```bash
+zig build test
+zig build
+python3 scripts/smoke.py zig-out/bin/zport
+```
+
 ## Usage
 
 ```bash
