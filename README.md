@@ -10,6 +10,27 @@ zport kill 3000
 `zport` is a tiny native alternative to reaching for `lsof`, `netstat`, `ss`,
 or `kill-port` during local development.
 
+## Install
+
+Homebrew:
+
+```bash
+brew install erik-kroon/tap/zport
+```
+
+Release archives are available for:
+
+- macOS arm64
+- macOS x86_64
+- Linux x86_64
+- Linux aarch64
+
+Download release artifacts and checksums from:
+
+```text
+https://github.com/erik-kroon/zport/releases
+```
+
 ## Build
 
 ```bash
