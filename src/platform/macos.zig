@@ -4,7 +4,7 @@ const c = @import("macos_c");
 
 pub fn scan(allocator: std.mem.Allocator, _: std.Io, filter: model.ScanFilter) !model.ScanResult {
     var entries: std.ArrayList(model.PortEntry) = .empty;
-    var stats: model.ScanStats = .{};
+    var diagnostics: model.ScanDiagnostics = .{};
     errdefer {
         for (entries.items) |entry| {
             if (entry.process_name) |name| allocator.free(name);
@@ -24,12 +24,12 @@ pub fn scan(allocator: std.mem.Allocator, _: std.Io, filter: model.ScanFilter) !
 
     for (pids[0..@min(pid_count, pids.len)]) |pid| {
         if (pid <= 0) continue;
-        try scanPid(allocator, pid, filter, &entries, &stats);
+        try scanPid(allocator, pid, filter, &entries, &diagnostics);
     }
 
     const owned = try entries.toOwnedSlice(allocator);
     model.sortEntries(owned);
-    return .{ .allocator = allocator, .entries = owned, .stats = stats };
+    return .{ .allocator = allocator, .entries = owned, .diagnostics = diagnostics };
 }
 
 fn scanPid(
@@ -37,12 +37,11 @@ fn scanPid(
     pid: c_int,
     filter: model.ScanFilter,
     entries: *std.ArrayList(model.PortEntry),
-    stats: *model.ScanStats,
+    diagnostics: *model.ScanDiagnostics,
 ) !void {
     const fd_bytes = c.proc_pidinfo(pid, c.PROC_PIDLISTFDS, 0, null, 0);
     if (fd_bytes < 0) {
-        stats.skipped_processes += 1;
-        stats.permission_errors += 1;
+        diagnostics.noteProcessPermissionDenied();
         return;
     }
     if (fd_bytes == 0) {
@@ -56,8 +55,7 @@ fn scanPid(
 
     const actual_bytes = c.proc_pidinfo(pid, c.PROC_PIDLISTFDS, 0, fds.ptr, fd_bytes);
     if (actual_bytes < 0) {
-        stats.skipped_processes += 1;
-        stats.permission_errors += 1;
+        diagnostics.noteProcessPermissionDenied();
         return;
     }
     if (actual_bytes == 0) {
@@ -73,7 +71,7 @@ fn scanPid(
         var socket_info: c.struct_socket_fdinfo = undefined;
         const info_bytes = c.proc_pidfdinfo(pid, fd.proc_fd, c.PROC_PIDFDSOCKETINFO, &socket_info, @sizeOf(c.struct_socket_fdinfo));
         if (info_bytes < @sizeOf(c.struct_socket_fdinfo)) {
-            stats.skipped_fds += 1;
+            diagnostics.noteFdPermissionDenied();
             continue;
         }
         const entry = socketEntryFromInfo(socket_info, pid, fd.proc_fd) orelse continue;

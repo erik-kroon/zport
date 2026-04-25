@@ -7,14 +7,14 @@ const Candidate = procnet.SocketCandidate;
 pub fn scan(allocator: std.mem.Allocator, io: std.Io, filter: model.ScanFilter) !model.ScanResult {
     var candidates: std.ArrayList(Candidate) = .empty;
     defer candidates.deinit(allocator);
-    var stats: model.ScanStats = .{};
-    var parse_stats: procnet.ParseStats = .{};
+    var diagnostics: model.ScanDiagnostics = .{};
+    var parse_diagnostics: procnet.ParseDiagnostics = .{};
 
-    try readTable(allocator, io, &candidates, "/proc/net/tcp", .tcp, .ipv4, &parse_stats);
-    try readTable(allocator, io, &candidates, "/proc/net/tcp6", .tcp, .ipv6, &parse_stats);
-    try readTable(allocator, io, &candidates, "/proc/net/udp", .udp, .ipv4, &parse_stats);
-    try readTable(allocator, io, &candidates, "/proc/net/udp6", .udp, .ipv6, &parse_stats);
-    stats.parse_errors = parse_stats.parse_errors;
+    try readTable(allocator, io, &candidates, "/proc/net/tcp", .tcp, .ipv4, &parse_diagnostics);
+    try readTable(allocator, io, &candidates, "/proc/net/tcp6", .tcp, .ipv6, &parse_diagnostics);
+    try readTable(allocator, io, &candidates, "/proc/net/udp", .udp, .ipv4, &parse_diagnostics);
+    try readTable(allocator, io, &candidates, "/proc/net/udp6", .udp, .ipv6, &parse_diagnostics);
+    diagnostics.noteMalformedSocketRows(parse_diagnostics.malformed_rows);
 
     var inode_to_index = std.AutoHashMap(u64, usize).init(allocator);
     defer inode_to_index.deinit();
@@ -37,7 +37,7 @@ pub fn scan(allocator: std.mem.Allocator, io: std.Io, filter: model.ScanFilter) 
     var seen = std.AutoHashMap(u128, void).init(allocator);
     defer seen.deinit();
 
-    scanProc(allocator, io, filter, &inode_to_index, candidates.items, matched, &entries, &seen, &stats) catch |err| switch (err) {
+    scanProc(allocator, io, filter, &inode_to_index, candidates.items, matched, &entries, &seen, &diagnostics) catch |err| switch (err) {
         error.FileNotFound => {},
         else => return err,
     };
@@ -50,7 +50,7 @@ pub fn scan(allocator: std.mem.Allocator, io: std.Io, filter: model.ScanFilter) 
 
     const owned = try entries.toOwnedSlice(allocator);
     model.sortEntries(owned);
-    return .{ .allocator = allocator, .entries = owned, .stats = stats };
+    return .{ .allocator = allocator, .entries = owned, .diagnostics = diagnostics };
 }
 
 fn readTable(
@@ -60,7 +60,7 @@ fn readTable(
     path: []const u8,
     protocol: model.Protocol,
     family: model.AddressFamily,
-    stats: *procnet.ParseStats,
+    diagnostics: *procnet.ParseDiagnostics,
 ) !void {
     const content = readProcFileAlloc(allocator, io, path, .limited(16 * 1024 * 1024)) catch |err| switch (err) {
         error.FileNotFound => return,
@@ -68,7 +68,7 @@ fn readTable(
         else => return err,
     };
     defer allocator.free(content);
-    try procnet.parseTable(allocator, candidates, content, protocol, family, stats);
+    try procnet.parseTable(allocator, candidates, content, protocol, family, diagnostics);
 }
 
 fn scanProc(
@@ -80,7 +80,7 @@ fn scanProc(
     matched: []bool,
     entries: *std.ArrayList(model.PortEntry),
     seen: *std.AutoHashMap(u128, void),
-    stats: *model.ScanStats,
+    diagnostics: *model.ScanDiagnostics,
 ) !void {
     var proc_dir = try std.Io.Dir.openDirAbsolute(io, "/proc", .{ .iterate = true });
     defer proc_dir.close(io);
@@ -89,7 +89,7 @@ fn scanProc(
     while (try it.next(io)) |entry| {
         if (!isNumeric(entry.name)) continue;
         const pid = std.fmt.parseInt(u32, entry.name, 10) catch continue;
-        try scanPid(allocator, io, entry.name, pid, filter, inode_to_index, candidates, matched, entries, seen, stats);
+        try scanPid(allocator, io, entry.name, pid, filter, inode_to_index, candidates, matched, entries, seen, diagnostics);
     }
 }
 
@@ -104,7 +104,7 @@ fn scanPid(
     matched: []bool,
     entries: *std.ArrayList(model.PortEntry),
     seen: *std.AutoHashMap(u128, void),
-    stats: *model.ScanStats,
+    diagnostics: *model.ScanDiagnostics,
 ) !void {
     const fd_path = try std.fmt.allocPrint(allocator, "/proc/{s}/fd", .{pid_name});
     defer allocator.free(fd_path);
@@ -112,8 +112,7 @@ fn scanPid(
     var fd_dir = std.Io.Dir.openDirAbsolute(io, fd_path, .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound => return,
         error.AccessDenied, error.PermissionDenied => {
-            stats.skipped_processes += 1;
-            stats.permission_errors += 1;
+            diagnostics.noteProcessPermissionDenied();
             return;
         },
         else => return err,
@@ -129,7 +128,7 @@ fn scanPid(
         const link_len = fd_dir.readLink(io, fd_entry.name, &link_buf) catch |err| switch (err) {
             error.FileNotFound => continue,
             error.AccessDenied, error.PermissionDenied => {
-                stats.skipped_fds += 1;
+                diagnostics.noteFdPermissionDenied();
                 continue;
             },
             else => continue,

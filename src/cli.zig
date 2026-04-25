@@ -98,87 +98,127 @@ pub fn parse(args: []const []const u8) ParseError!Config {
 }
 
 fn parseList(args: []const []const u8) ParseError!ListOptions {
-    var opts: ListOptions = .{};
-    var port_seen = false;
-    var i: usize = 0;
-    while (i < args.len) : (i += 1) {
-        const arg = args[i];
-        if (std.mem.eql(u8, arg, "--tcp")) {
-            try setProtocol(&opts.protocol, .tcp);
-        } else if (std.mem.eql(u8, arg, "--udp")) {
-            try setProtocol(&opts.protocol, .udp);
-        } else if (std.mem.eql(u8, arg, "--protocol")) {
-            i += 1;
-            if (i >= args.len) return error.Usage;
-            try setProtocol(&opts.protocol, try parseProtocol(args[i]));
+    var parser = ArgParser.init(args);
+    var shared: SharedOptions = .{};
+    var json = false;
+    var no_header = false;
+
+    while (parser.next()) |arg| {
+        if (try parseProtocolOption(&parser, &shared.protocol, arg)) {
+            continue;
         } else if (std.mem.eql(u8, arg, "--json")) {
-            opts.json = true;
+            json = true;
         } else if (std.mem.eql(u8, arg, "--no-header")) {
-            opts.no_header = true;
+            no_header = true;
         } else if (std.mem.startsWith(u8, arg, "-")) {
             return error.Usage;
         } else {
-            if (port_seen) return error.Usage;
-            opts.port = try parsePort(arg);
-            port_seen = true;
+            try shared.setPort(arg);
         }
     }
-    return opts;
+
+    return .{
+        .port = shared.port,
+        .protocol = shared.protocol,
+        .json = json,
+        .no_header = no_header,
+    };
 }
 
 fn parseKill(args: []const []const u8) ParseError!KillOptions {
-    var port: ?u16 = null;
-    var protocol: ?model.Protocol = null;
+    var parser = ArgParser.init(args);
+    var shared: SharedOptions = .{};
     var signal: KillSignal = .term;
     var signal_set = false;
     var force_set = false;
     var dry_run = false;
     var wait_ms: u32 = 1000;
 
-    var i: usize = 0;
-    while (i < args.len) : (i += 1) {
-        const arg = args[i];
-        if (std.mem.eql(u8, arg, "--tcp")) {
-            try setProtocol(&protocol, .tcp);
-        } else if (std.mem.eql(u8, arg, "--udp")) {
-            try setProtocol(&protocol, .udp);
-        } else if (std.mem.eql(u8, arg, "--protocol")) {
-            i += 1;
-            if (i >= args.len) return error.Usage;
-            try setProtocol(&protocol, try parseProtocol(args[i]));
+    while (parser.next()) |arg| {
+        if (try parseProtocolOption(&parser, &shared.protocol, arg)) {
+            continue;
         } else if (std.mem.eql(u8, arg, "--force") or std.mem.eql(u8, arg, "-9")) {
             if (signal_set) return error.Usage;
             signal = .kill;
             force_set = true;
         } else if (std.mem.eql(u8, arg, "--signal")) {
             if (force_set or signal_set) return error.Usage;
-            i += 1;
-            if (i >= args.len) return error.Usage;
-            signal = try parseSignal(args[i]);
+            signal = try parseSignal(try parser.takeValue());
             signal_set = true;
         } else if (std.mem.eql(u8, arg, "--dry-run")) {
             dry_run = true;
         } else if (std.mem.eql(u8, arg, "--wait")) {
-            i += 1;
-            if (i >= args.len) return error.Usage;
-            wait_ms = std.fmt.parseInt(u32, args[i], 10) catch return error.Usage;
-        } else if (std.mem.eql(u8, arg, "--json") or std.mem.eql(u8, arg, "--no-header")) {
+            wait_ms = std.fmt.parseInt(u32, try parser.takeValue(), 10) catch return error.Usage;
+        } else if (isListOutputOption(arg)) {
             return error.Usage;
         } else if (std.mem.startsWith(u8, arg, "-")) {
             return error.Usage;
         } else {
-            if (port != null) return error.Usage;
-            port = try parsePort(arg);
+            try shared.setPort(arg);
         }
     }
 
     return .{
-        .port = port orelse return error.Usage,
-        .protocol = protocol,
+        .port = try shared.requirePort(),
+        .protocol = shared.protocol,
         .signal = signal,
         .dry_run = dry_run,
         .wait_ms = wait_ms,
     };
+}
+
+const ArgParser = struct {
+    args: []const []const u8,
+    index: usize = 0,
+
+    fn init(args: []const []const u8) ArgParser {
+        return .{ .args = args };
+    }
+
+    fn next(self: *ArgParser) ?[]const u8 {
+        if (self.index >= self.args.len) return null;
+        const arg = self.args[self.index];
+        self.index += 1;
+        return arg;
+    }
+
+    fn takeValue(self: *ArgParser) ParseError![]const u8 {
+        return self.next() orelse error.Usage;
+    }
+};
+
+const SharedOptions = struct {
+    port: ?u16 = null,
+    protocol: ?model.Protocol = null,
+
+    fn setPort(self: *SharedOptions, value: []const u8) ParseError!void {
+        if (self.port != null) return error.Usage;
+        self.port = try parsePort(value);
+    }
+
+    fn requirePort(self: SharedOptions) ParseError!u16 {
+        return self.port orelse error.Usage;
+    }
+};
+
+fn parseProtocolOption(parser: *ArgParser, protocol: *?model.Protocol, arg: []const u8) ParseError!bool {
+    if (std.mem.eql(u8, arg, "--tcp")) {
+        try setProtocol(protocol, .tcp);
+        return true;
+    }
+    if (std.mem.eql(u8, arg, "--udp")) {
+        try setProtocol(protocol, .udp);
+        return true;
+    }
+    if (std.mem.eql(u8, arg, "--protocol")) {
+        try setProtocol(protocol, try parseProtocol(try parser.takeValue()));
+        return true;
+    }
+    return false;
+}
+
+fn isListOutputOption(arg: []const u8) bool {
+    return std.mem.eql(u8, arg, "--json") or std.mem.eql(u8, arg, "--no-header");
 }
 
 fn setProtocol(slot: *?model.Protocol, value: model.Protocol) ParseError!void {
