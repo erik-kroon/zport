@@ -2,7 +2,7 @@ const std = @import("std");
 const model = @import("../model.zig");
 const c = @import("macos_c");
 
-pub fn scan(allocator: std.mem.Allocator, _: std.Io, filter: model.ScanFilter) !model.ScanResult {
+pub fn scan(allocator: std.mem.Allocator, _: std.Io, filter_hint: model.ScanFilter) !model.ScanResult {
     var entries: std.ArrayList(model.PortEntry) = .empty;
     var diagnostics: model.ScanDiagnostics = .{};
     errdefer {
@@ -24,18 +24,17 @@ pub fn scan(allocator: std.mem.Allocator, _: std.Io, filter: model.ScanFilter) !
 
     for (pids[0..@min(pid_count, pids.len)]) |pid| {
         if (pid <= 0) continue;
-        try scanPid(allocator, pid, filter, &entries, &diagnostics);
+        try scanPid(allocator, pid, filter_hint, &entries, &diagnostics);
     }
 
     const owned = try entries.toOwnedSlice(allocator);
-    model.sortEntries(owned);
     return .{ .allocator = allocator, .entries = owned, .diagnostics = diagnostics };
 }
 
 fn scanPid(
     allocator: std.mem.Allocator,
     pid: c_int,
-    filter: model.ScanFilter,
+    filter_hint: model.ScanFilter,
     entries: *std.ArrayList(model.PortEntry),
     diagnostics: *model.ScanDiagnostics,
 ) !void {
@@ -75,7 +74,7 @@ fn scanPid(
             continue;
         }
         const entry = socketEntryFromInfo(socket_info, pid, fd.proc_fd) orelse continue;
-        if (!filter.matches(entry)) continue;
+        if (!filter_hint.matches(entry)) continue;
 
         if (process_name == null) process_name = try readProcessName(allocator, pid);
         var owned = entry;

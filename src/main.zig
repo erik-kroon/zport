@@ -54,19 +54,20 @@ fn run(init: std.process.Init) !cli.ExitCode {
             try stdout.print("zport {s}\n", .{build_options.version});
             return .ok;
         },
-        .list => |opts| return runList(init.gpa, init.io, stdout, stderr, opts),
+        .list => |opts| return runList(backend.Scanner.platform(), init.gpa, init.io, stdout, stderr, opts),
         .kill => |opts| return (try kill.run(init.gpa, init.io, stdout, stderr, opts)).code,
     }
 }
 
 fn runList(
+    scanner: backend.Scanner,
     allocator: std.mem.Allocator,
     io: std.Io,
     stdout: *std.Io.Writer,
     stderr: *std.Io.Writer,
     opts: cli.ListOptions,
 ) !cli.ExitCode {
-    var result = try backend.scan(allocator, io, .{ .port = opts.port, .protocol = opts.protocol });
+    var result = try scanner.scan(allocator, io, .{ .port = opts.port, .protocol = opts.protocol });
     defer result.deinit();
 
     if (opts.json) {
@@ -90,4 +91,26 @@ fn runList(
 
 test {
     _ = model;
+}
+
+test "list command uses scanner seam and reports filtered misses" {
+    const entries = [_]model.PortEntry{.{
+        .protocol = .tcp,
+        .local_address = .{ .ipv4 = .{ 127, 0, 0, 1 } },
+        .local_port = 3000,
+        .pid = 42,
+        .process_name = "node",
+        .source = .{ .backend = .test_backend },
+    }};
+    const source: backend.SnapshotSource = .{ .snapshot = .{ .entries = &entries } };
+
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    var err = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer err.deinit();
+
+    const code = try runList(source.scanner(), std.testing.allocator, std.testing.io, &out.writer, &err.writer, .{ .port = 4000 });
+
+    try std.testing.expectEqual(cli.ExitCode.no_match, code);
+    try std.testing.expect(std.mem.indexOf(u8, err.written(), "no process found using port 4000") != null);
 }
