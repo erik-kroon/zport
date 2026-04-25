@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 
 test {
     _ = @import("model.zig");
+    _ = @import("endpoint.zig");
     _ = @import("cli.zig");
     _ = @import("output.zig");
     _ = @import("platform/linux_procnet.zig");

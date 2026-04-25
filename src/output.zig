@@ -1,4 +1,5 @@
 const std = @import("std");
+const endpoint = @import("endpoint.zig");
 const model = @import("model.zig");
 
 pub const TableOptions = struct {
@@ -8,7 +9,7 @@ pub const TableOptions = struct {
 pub fn writeTable(writer: *std.Io.Writer, entries: []const model.PortEntry, opts: TableOptions) !void {
     var local_width: usize = "LOCAL".len;
     for (entries) |entry| {
-        const width = localWidth(entry);
+        const width = endpoint.local(entry).width();
         if (width > local_width) local_width = width;
     }
 
@@ -21,7 +22,7 @@ pub fn writeTable(writer: *std.Io.Writer, entries: []const model.PortEntry, opts
     }
     for (entries) |entry| {
         try writer.print("{s:<5}  ", .{entry.protocol.text()});
-        try writeLocalPadded(writer, entry, local_width);
+        try writeLocalPadded(writer, endpoint.local(entry), local_width);
         try writer.writeAll("  ");
         if (entry.pid) |pid| {
             try writer.print("{d:<5}", .{pid});
@@ -39,7 +40,7 @@ pub fn writeJson(writer: *std.Io.Writer, result: model.ScanResult) !void {
         try writer.writeAll("{");
         try writer.print("\"protocol\":\"{s}\",", .{entry.protocol.text()});
         try writer.writeAll("\"local_address\":\"");
-        try writeAddress(writer, entry.local_address);
+        try endpoint.address(entry.local_address).write(writer);
         try writer.print("\",\"local_port\":{d},", .{entry.local_port});
         if (entry.pid) |pid| {
             try writer.print("\"pid\":{d},", .{pid});
@@ -68,94 +69,12 @@ pub fn writeJson(writer: *std.Io.Writer, result: model.ScanResult) !void {
     try writer.writeAll("}}\n");
 }
 
-pub fn writeLocal(writer: *std.Io.Writer, entry: model.PortEntry) !void {
-    switch (entry.local_address) {
-        .ipv4 => {
-            try writeAddress(writer, entry.local_address);
-            try writer.print(":{d}", .{entry.local_port});
-        },
-        .ipv6 => {
-            try writer.writeAll("[");
-            try writeAddress(writer, entry.local_address);
-            try writer.print("]:{d}", .{entry.local_port});
-        },
-    }
-}
-
-pub fn writeAddress(writer: *std.Io.Writer, address: model.IpAddress) !void {
-    switch (address) {
-        .ipv4 => |bytes| try writer.print("{d}.{d}.{d}.{d}", .{ bytes[0], bytes[1], bytes[2], bytes[3] }),
-        .ipv6 => |bytes| try writeIpv6(writer, bytes),
-    }
-}
-
-fn writeLocalPadded(writer: *std.Io.Writer, entry: model.PortEntry, width: usize) !void {
-    try writeLocal(writer, entry);
-    const written = localWidth(entry);
+fn writeLocalPadded(writer: *std.Io.Writer, local_display: endpoint.Local, width: usize) !void {
+    try local_display.write(writer);
+    const written = local_display.width();
     if (written < width) {
         for (0..(width - written)) |_| try writer.writeByte(' ');
     }
-}
-
-fn localWidth(entry: model.PortEntry) usize {
-    const port_width = decimalWidth(entry.local_port);
-    return switch (entry.local_address) {
-        .ipv4 => |bytes| decimalWidth(bytes[0]) + 1 + decimalWidth(bytes[1]) + 1 + decimalWidth(bytes[2]) + 1 + decimalWidth(bytes[3]) + 1 + port_width,
-        .ipv6 => |bytes| ipv6Width(bytes) + 3 + port_width,
-    };
-}
-
-fn decimalWidth(value: anytype) usize {
-    var n: u64 = @intCast(value);
-    var width: usize = 1;
-    while (n >= 10) : (n /= 10) width += 1;
-    return width;
-}
-
-fn writeIpv6(writer: *std.Io.Writer, bytes: [16]u8) !void {
-    var parts: [8]u16 = undefined;
-    for (&parts, 0..) |*part, i| {
-        part.* = std.mem.readInt(u16, bytes[i * 2 ..][0..2], .big);
-    }
-
-    var best_start: usize = 8;
-    var best_len: usize = 0;
-    var run_start: usize = 0;
-    var run_len: usize = 0;
-    for (parts, 0..) |part, i| {
-        if (part == 0) {
-            if (run_len == 0) run_start = i;
-            run_len += 1;
-            if (run_len > best_len) {
-                best_start = run_start;
-                best_len = run_len;
-            }
-        } else {
-            run_len = 0;
-        }
-    }
-    if (best_len < 2) {
-        best_start = 8;
-        best_len = 0;
-    }
-
-    var i: usize = 0;
-    while (i < parts.len) : (i += 1) {
-        if (i == best_start) {
-            try writer.writeAll(if (i == 0) "::" else ":");
-            i += best_len - 1;
-            continue;
-        }
-        try writer.print("{x}", .{parts[i]});
-        if (i != parts.len - 1) try writer.writeByte(':');
-    }
-}
-
-fn ipv6Width(bytes: [16]u8) usize {
-    var buf: [64]u8 = undefined;
-    var writer: std.Io.Writer = .fixed(&buf);
-    writeIpv6(&writer, bytes) catch return 39;
-    return writer.end;
 }
 
 fn writeJsonString(writer: *std.Io.Writer, value: []const u8) !void {
