@@ -55,6 +55,7 @@ const ScanState = struct {
 
     fn run(self: *ScanState) !void {
         try self.readTables();
+        if (self.candidates.items.len == 0) return;
         try self.indexCandidates();
         try self.allocateMatchedSet();
         self.scanProc() catch |err| switch (err) {
@@ -88,13 +89,17 @@ const ScanState = struct {
         protocol: model.Protocol,
         family: model.AddressFamily,
     ) !void {
+        if (self.filter.protocol) |wanted| {
+            if (wanted != protocol) return;
+        }
+
         const content = self.readProcFileAlloc(path, .limited(16 * 1024 * 1024)) catch |err| switch (err) {
             error.FileNotFound => return,
             error.AccessDenied, error.PermissionDenied => return,
             else => return err,
         };
         defer self.allocator.free(content);
-        try procnet.parseTable(self.allocator, &self.candidates, content, protocol, family, &self.parse_diagnostics);
+        try procnet.parseTable(self.allocator, &self.candidates, content, protocol, family, self.filter, &self.parse_diagnostics);
     }
 
     fn indexCandidates(self: *ScanState) !void {
@@ -121,8 +126,8 @@ const ScanState = struct {
     }
 
     fn scanPid(self: *ScanState, pid_name: []const u8, pid: u32) !void {
-        const fd_path = try std.fmt.allocPrint(self.allocator, "/proc/{s}/fd", .{pid_name});
-        defer self.allocator.free(fd_path);
+        var fd_path_buf: [64]u8 = undefined;
+        const fd_path = std.fmt.bufPrint(&fd_path_buf, "/proc/{s}/fd", .{pid_name}) catch unreachable;
 
         var fd_dir = std.Io.Dir.openDirAbsolute(self.io, fd_path, .{ .iterate = true }) catch |err| switch (err) {
             error.FileNotFound => return,
@@ -159,8 +164,7 @@ const ScanState = struct {
     fn matchInode(self: *ScanState, pid: u32, inode: u64) !?MatchedSocket {
         const candidate_index = self.inode_to_index.get(inode) orelse return null;
         const candidate = self.candidates.items[candidate_index];
-        const base_entry = entryFromCandidate(candidate, pid, null);
-        if (!self.filter.matches(base_entry)) return null;
+        if (!self.filter.matchesLocal(candidate.protocol, candidate.port)) return null;
 
         const key = socketProcessKey(inode, pid);
         const put = try self.seen.getOrPut(key);
@@ -184,15 +188,15 @@ const ScanState = struct {
 
     fn appendUnmatchedCandidates(self: *ScanState) !void {
         for (self.candidates.items, 0..) |candidate, i| {
-            if (!self.matched[i] and self.filter.matches(entryFromCandidate(candidate, null, null))) {
+            if (!self.matched[i]) {
                 try self.entries.append(self.allocator, entryFromCandidate(candidate, null, null));
             }
         }
     }
 
     fn readProcessName(self: *ScanState, pid_name: []const u8) !?[]const u8 {
-        const path = try std.fmt.allocPrint(self.allocator, "/proc/{s}/comm", .{pid_name});
-        defer self.allocator.free(path);
+        var path_buf: [64]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "/proc/{s}/comm", .{pid_name}) catch unreachable;
         const raw = self.readProcFileAlloc(path, .limited(4096)) catch return null;
         defer self.allocator.free(raw);
         const trimmed = std.mem.trim(u8, raw, "\n\r");

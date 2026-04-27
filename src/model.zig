@@ -100,11 +100,15 @@ pub const ScanFilter = struct {
     protocol: ?Protocol = null,
 
     pub fn matches(self: ScanFilter, entry: PortEntry) bool {
-        if (self.port) |port| {
-            if (entry.local_port != port) return false;
+        return self.matchesLocal(entry.protocol, entry.local_port);
+    }
+
+    pub fn matchesLocal(self: ScanFilter, protocol: Protocol, port: u16) bool {
+        if (self.port) |wanted_port| {
+            if (port != wanted_port) return false;
         }
-        if (self.protocol) |protocol| {
-            if (entry.protocol != protocol) return false;
+        if (self.protocol) |wanted_protocol| {
+            if (protocol != wanted_protocol) return false;
         }
         return true;
     }
@@ -150,6 +154,8 @@ test "scan filter matches port and protocol" {
     try std.testing.expect(!(ScanFilter{ .port = 4000 }).matches(entry));
     try std.testing.expect((ScanFilter{ .protocol = .tcp }).matches(entry));
     try std.testing.expect(!(ScanFilter{ .protocol = .udp }).matches(entry));
+    try std.testing.expect((ScanFilter{ .port = 3000, .protocol = .tcp }).matchesLocal(.tcp, 3000));
+    try std.testing.expect(!(ScanFilter{ .port = 3000, .protocol = .tcp }).matchesLocal(.udp, 3000));
 }
 
 test "entries sort deterministically" {
