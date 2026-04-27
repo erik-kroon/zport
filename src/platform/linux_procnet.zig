@@ -19,6 +19,7 @@ pub fn parseTable(
     content: []const u8,
     protocol: model.Protocol,
     family: model.AddressFamily,
+    filter: model.ScanFilter,
     diagnostics: *ParseDiagnostics,
 ) !void {
     var lines = std.mem.splitScalar(u8, content, '\n');
@@ -27,6 +28,7 @@ pub fn parseTable(
         const line = std.mem.trim(u8, line_raw, " \t\r");
         if (line.len == 0) continue;
         if (parseLine(line, protocol, family)) |candidate| {
+            if (!filter.matchesLocal(candidate.protocol, candidate.port)) continue;
             try out.append(allocator, candidate);
         } else |err| switch (err) {
             error.Skip => {},
@@ -111,13 +113,29 @@ test "parses linux proc net rows" {
     var list: std.ArrayList(SocketCandidate) = .empty;
     defer list.deinit(std.testing.allocator);
     var diagnostics: ParseDiagnostics = .{};
-    try parseTable(std.testing.allocator, &list, fixture, .tcp, .ipv4, &diagnostics);
+    try parseTable(std.testing.allocator, &list, fixture, .tcp, .ipv4, .{}, &diagnostics);
 
     try std.testing.expectEqual(@as(usize, 1), list.items.len);
     try std.testing.expectEqual(@as(u16, 3000), list.items[0].port);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 127, 0, 0, 1 }, &list.items[0].address.ipv4);
     try std.testing.expectEqual(@as(u64, 123456), list.items[0].inode);
     try std.testing.expectEqual(@as(usize, 0), diagnostics.malformed_rows);
+}
+
+test "filters parsed linux proc net candidates" {
+    const fixture =
+        \\  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+        \\   0: 0100007F:0BB8 00000000:0000 0A 00000000:00000000 00:00000000 00000000  501        0 123456 1 0000000000000000 100 0 0 10 0
+        \\   1: 0100007F:0BB9 00000000:0000 0A 00000000:00000000 00:00000000 00000000  501        0 999999 1 0000000000000000 100 0 0 10 0
+    ;
+    var list: std.ArrayList(SocketCandidate) = .empty;
+    defer list.deinit(std.testing.allocator);
+    var diagnostics: ParseDiagnostics = .{};
+    try parseTable(std.testing.allocator, &list, fixture, .tcp, .ipv4, .{ .port = 3000 }, &diagnostics);
+
+    try std.testing.expectEqual(@as(usize, 1), list.items.len);
+    try std.testing.expectEqual(@as(u16, 3000), list.items[0].port);
+    try std.testing.expectEqual(@as(u64, 123456), list.items[0].inode);
 }
 
 test "parses linux ipv6 proc address" {
