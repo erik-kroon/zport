@@ -190,6 +190,19 @@ def test_table_and_json(zport):
     with_udp_socket(check_udp)
 
 
+def test_multi_port_list(zport):
+    def check_first(first_port):
+        def check_second(second_port):
+            result = run_zport(zport, str(first_port), str(second_port), "--json")
+            entries = json_entries(result)
+            require(has_entry(entries, protocol="tcp", port=first_port, pid=os.getpid()), "multi-port JSON did not include first TCP listener")
+            require(has_entry(entries, protocol="tcp", port=second_port, pid=os.getpid()), "multi-port JSON did not include second TCP listener")
+
+        with_tcp_listener(check_second)
+
+    with_tcp_listener(check_first)
+
+
 def test_kill(zport):
     process, port, temp = start_child_listener("tcp")
     try:
@@ -211,6 +224,33 @@ def test_kill(zport):
         temp.cleanup()
 
 
+def test_multi_port_kill(zport):
+    first, first_port, first_temp = start_child_listener("tcp")
+    second, second_port, second_temp = start_child_listener("tcp")
+    try:
+        wait_for_entry(zport, protocol="tcp", port=first_port, pid=first.pid)
+        wait_for_entry(zport, protocol="tcp", port=second_port, pid=second.pid)
+
+        dry_run = run_zport(zport, "kill", str(first_port), str(second_port), "--dry-run")
+        require(str(first.pid) in dry_run.stdout, "multi-port dry-run output did not include first child PID")
+        require(str(second.pid) in dry_run.stdout, "multi-port dry-run output did not include second child PID")
+        require(first.poll() is None, "multi-port dry-run terminated the first child process")
+        require(second.poll() is None, "multi-port dry-run terminated the second child process")
+
+        killed = run_zport(zport, "kill", str(first_port), str(second_port), "--wait", "3000", timeout=8)
+        require(killed.returncode == 0, "multi-port kill command failed")
+        for label, process in (("first", first), ("second", second)):
+            try:
+                process.wait(timeout=4)
+            except subprocess.TimeoutExpired:
+                fail(f"{label} child process was still running after multi-port zport kill", killed)
+    finally:
+        cleanup_child(first)
+        cleanup_child(second)
+        first_temp.cleanup()
+        second_temp.cleanup()
+
+
 def main():
     if len(sys.argv) != 2:
         print("usage: smoke.py /path/to/zport", file=sys.stderr)
@@ -223,7 +263,9 @@ def main():
 
     try:
         test_table_and_json(zport)
+        test_multi_port_list(zport)
         test_kill(zport)
+        test_multi_port_kill(zport)
     except SmokeFailure as err:
         print(err, file=sys.stderr)
         return 1

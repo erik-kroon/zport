@@ -57,25 +57,28 @@ python3 scripts/smoke.py zig-out/bin/zport
 ```bash
 zport
 zport 3000
+zport 3000 4000
 zport list 3000
+zport list 3000 4000
 zport --tcp
 zport --udp
 zport --protocol tcp
 zport --json
 zport --no-header
 zport kill 3000
+zport kill 3000 4000
 zport kill 3000 --force
 zport kill 3000 --signal INT
 zport kill 3000 --dry-run
 zport kill 3000 --wait 2000
 ```
 
-`zport` lists listening TCP sockets and bound UDP sockets. `zport <port>` filters
-to a single local port.
+`zport` lists listening TCP sockets and bound UDP sockets. `zport <port ...>`
+filters to one or more local ports.
 
 ## Kill Behavior
 
-`zport kill <port>` sends `SIGTERM` to each unique PID holding the requested
+`zport kill <port ...>` sends `SIGTERM` to each unique PID holding a requested
 port, waits up to 1000ms, and exits nonzero if a targeted process is still
 alive. Use `--force` or `--signal KILL` to send `SIGKILL` explicitly.
 
