@@ -27,8 +27,7 @@ const KillRuntime = struct {
         std.Io,
         std.mem.Allocator,
         []const u32,
-        u16,
-        ?model.Protocol,
+        model.ScanFilter,
         u32,
     ) anyerror![]u32,
 };
@@ -61,14 +60,15 @@ pub fn runWithScanner(
     stderr: *std.Io.Writer,
     opts: cli.KillOptions,
 ) !KillResult {
-    var result = try scanner.scan(allocator, io, .{ .port = opts.port, .protocol = opts.protocol });
+    const filter = opts.scanFilter();
+    var result = try scanner.scan(allocator, io, filter);
     defer result.deinit();
 
     var plan = try planTargets(allocator, result.entries);
     defer plan.deinit(allocator);
 
     if (plan.pids.len == 0) {
-        try stderr.print("zport: no process found using port {d}\n", .{opts.port});
+        try writeNoTargetMessage(stderr, opts.requestedPorts());
         return .{ .code = .no_match };
     }
 
@@ -125,7 +125,9 @@ fn executeAttempt(
     plan: TargetPlan,
     runtime: KillRuntime,
 ) !cli.ExitCode {
-    try stdout.print("Killing processes using port {d}:\n\n", .{opts.port});
+    try stdout.writeAll("Killing processes using ");
+    try writePortRequest(stdout, opts.requestedPorts());
+    try stdout.writeAll(":\n\n");
     try output.writeTable(stdout, plan.entries, .{});
     try stdout.writeByte('\n');
 
@@ -138,8 +140,7 @@ fn executeAttempt(
         io,
         allocator,
         plan.pids,
-        opts.port,
-        opts.protocol,
+        opts.scanFilter(),
         opts.wait_ms,
     );
     defer allocator.free(survivors);
@@ -205,8 +206,7 @@ fn waitForPortRelease(
     io: std.Io,
     allocator: std.mem.Allocator,
     pids: []const u32,
-    port: u16,
-    protocol: ?model.Protocol,
+    filter: model.ScanFilter,
     wait_ms: u32,
 ) ![]u32 {
     const runtime_context: *RuntimeContext = @ptrCast(@alignCast(context));
@@ -215,14 +215,14 @@ fn waitForPortRelease(
 
     var elapsed: u32 = 0;
     while (elapsed < wait_ms) : (elapsed += 50) {
-        if (!try anyTargetStillHoldsPort(runtime_context.scanner, allocator, io, pids, port, protocol, null)) {
+        if (!try anyTargetStillHoldsPort(runtime_context.scanner, allocator, io, pids, filter, null)) {
             return try remaining.toOwnedSlice(allocator);
         }
         const sleep_ms = @min(@as(u32, 50), wait_ms - elapsed);
         try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(sleep_ms), .awake);
     }
 
-    _ = try anyTargetStillHoldsPort(runtime_context.scanner, allocator, io, pids, port, protocol, &remaining);
+    _ = try anyTargetStillHoldsPort(runtime_context.scanner, allocator, io, pids, filter, &remaining);
     return try remaining.toOwnedSlice(allocator);
 }
 
@@ -231,11 +231,10 @@ fn anyTargetStillHoldsPort(
     allocator: std.mem.Allocator,
     io: std.Io,
     pids: []const u32,
-    port: u16,
-    protocol: ?model.Protocol,
+    filter: model.ScanFilter,
     remaining: ?*std.ArrayList(u32),
 ) !bool {
-    var result = try scanner.scan(allocator, io, .{ .port = port, .protocol = protocol });
+    var result = try scanner.scan(allocator, io, filter);
     defer result.deinit();
     var seen = std.AutoHashMap(u32, void).init(allocator);
     defer seen.deinit();
@@ -266,6 +265,30 @@ fn toPosixSignal(signal: cli.KillSignal) std.posix.SIG {
         .int => .INT,
         .hup => .HUP,
     };
+}
+
+fn writeNoTargetMessage(writer: *std.Io.Writer, ports: model.PortSet) !void {
+    if (ports.count == 1) {
+        try writer.print("zport: no process found using port {d}\n", .{ports.first().?});
+    } else {
+        try writer.writeAll("zport: no process found using requested ports\n");
+    }
+}
+
+fn writePortRequest(writer: *std.Io.Writer, ports: model.PortSet) !void {
+    if (ports.count == 1) {
+        try writer.print("port {d}", .{ports.first().?});
+        return;
+    }
+
+    try writer.writeAll("ports ");
+    var first = true;
+    var it = ports.bits.iterator(.{});
+    while (it.next()) |index| {
+        if (!first) try writer.writeAll(", ");
+        first = false;
+        try writer.print("{d}", .{index});
+    }
 }
 
 test "target planning keeps display rows and deduplicates signal pids" {
@@ -362,6 +385,57 @@ test "kill dry-run uses scanner-owned filtering" {
     try std.testing.expectEqual(@as(usize, 0), err.written().len);
 }
 
+test "kill dry-run accepts multiple requested ports" {
+    const entries = [_]model.PortEntry{
+        .{
+            .protocol = .tcp,
+            .local_address = .{ .ipv4 = .{ 127, 0, 0, 1 } },
+            .local_port = 3000,
+            .pid = 42,
+            .process_name = "node",
+            .source = .{ .backend = .test_backend },
+        },
+        .{
+            .protocol = .tcp,
+            .local_address = .{ .ipv4 = .{ 127, 0, 0, 1 } },
+            .local_port = 4000,
+            .pid = 99,
+            .process_name = "vite",
+            .source = .{ .backend = .test_backend },
+        },
+        .{
+            .protocol = .tcp,
+            .local_address = .{ .ipv4 = .{ 127, 0, 0, 1 } },
+            .local_port = 5000,
+            .pid = 100,
+            .process_name = "other",
+            .source = .{ .backend = .test_backend },
+        },
+    };
+    const source: backend.SnapshotSource = .{ .snapshot = .{ .entries = &entries } };
+
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    var err = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer err.deinit();
+
+    var ports: model.PortSet = .{};
+    ports.add(3000);
+    ports.add(4000);
+
+    const result = try runWithScanner(source.scanner(), std.testing.allocator, std.testing.io, &out.writer, &err.writer, .{
+        .port = 3000,
+        .ports = ports,
+        .dry_run = true,
+    });
+
+    try std.testing.expectEqual(cli.ExitCode.ok, result.code);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "127.0.0.1:3000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "127.0.0.1:4000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "127.0.0.1:5000") == null);
+    try std.testing.expectEqual(@as(usize, 0), err.written().len);
+}
+
 test "wait for port release uses scripted scanner snapshots" {
     const pids = [_]u32{42};
 
@@ -380,7 +454,7 @@ test "wait for port release uses scripted scanner snapshots" {
     var source: backend.ScriptedSource = .{ .snapshots = &snapshots };
     var runtime_context: RuntimeContext = .{ .scanner = source.scanner() };
 
-    const survivors = try waitForPortRelease(&runtime_context, std.testing.io, std.testing.allocator, &pids, 3000, .tcp, 100);
+    const survivors = try waitForPortRelease(&runtime_context, std.testing.io, std.testing.allocator, &pids, .{ .port = 3000, .protocol = .tcp }, 100);
     defer std.testing.allocator.free(survivors);
 
     try std.testing.expectEqual(@as(usize, 0), survivors.len);
@@ -423,8 +497,7 @@ const FakeRuntime = struct {
         _: std.Io,
         allocator: std.mem.Allocator,
         _: []const u32,
-        _: u16,
-        _: ?model.Protocol,
+        _: model.ScanFilter,
         _: u32,
     ) ![]u32 {
         const self: *FakeRuntime = @ptrCast(@alignCast(context));

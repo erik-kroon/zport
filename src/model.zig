@@ -95,9 +95,42 @@ pub const ScanResult = struct {
     }
 };
 
+pub const PortSet = struct {
+    bits: std.StaticBitSet(65536) = std.StaticBitSet(65536).initEmpty(),
+    count: usize = 0,
+
+    pub fn add(self: *PortSet, port: u16) void {
+        const index: usize = port;
+        if (!self.bits.isSet(index)) {
+            self.bits.set(index);
+            self.count += 1;
+        }
+    }
+
+    pub fn contains(self: PortSet, port: u16) bool {
+        return self.bits.isSet(port);
+    }
+
+    pub fn isEmpty(self: PortSet) bool {
+        return self.count == 0;
+    }
+
+    pub fn first(self: PortSet) ?u16 {
+        var it = self.bits.iterator(.{});
+        const index = it.next() orelse return null;
+        return @intCast(index);
+    }
+};
+
 pub const ScanFilter = struct {
     port: ?u16 = null,
+    ports: PortSet = .{},
     protocol: ?Protocol = null,
+
+    pub fn fromPorts(ports: PortSet, protocol: ?Protocol) ScanFilter {
+        if (ports.count == 1) return .{ .port = ports.first().?, .protocol = protocol };
+        return .{ .ports = ports, .protocol = protocol };
+    }
 
     pub fn matches(self: ScanFilter, entry: PortEntry) bool {
         return self.matchesLocal(entry.protocol, entry.local_port);
@@ -107,10 +140,15 @@ pub const ScanFilter = struct {
         if (self.port) |wanted_port| {
             if (port != wanted_port) return false;
         }
+        if (!self.ports.isEmpty() and !self.ports.contains(port)) return false;
         if (self.protocol) |wanted_protocol| {
             if (protocol != wanted_protocol) return false;
         }
         return true;
+    }
+
+    pub fn hasPortFilter(self: ScanFilter) bool {
+        return self.port != null or !self.ports.isEmpty();
     }
 };
 
@@ -156,6 +194,19 @@ test "scan filter matches port and protocol" {
     try std.testing.expect(!(ScanFilter{ .protocol = .udp }).matches(entry));
     try std.testing.expect((ScanFilter{ .port = 3000, .protocol = .tcp }).matchesLocal(.tcp, 3000));
     try std.testing.expect(!(ScanFilter{ .port = 3000, .protocol = .tcp }).matchesLocal(.udp, 3000));
+}
+
+test "scan filter matches multiple ports" {
+    var ports: PortSet = .{};
+    ports.add(3000);
+    ports.add(4000);
+    ports.add(3000);
+
+    try std.testing.expectEqual(@as(usize, 2), ports.count);
+    try std.testing.expect((ScanFilter{ .ports = ports }).matchesLocal(.tcp, 3000));
+    try std.testing.expect((ScanFilter{ .ports = ports }).matchesLocal(.tcp, 4000));
+    try std.testing.expect(!(ScanFilter{ .ports = ports }).matchesLocal(.tcp, 5000));
+    try std.testing.expectEqual(@as(?u16, 3000), ports.first());
 }
 
 test "entries sort deterministically" {

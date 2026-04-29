@@ -67,7 +67,8 @@ fn runList(
     stderr: *std.Io.Writer,
     opts: cli.ListOptions,
 ) !cli.ExitCode {
-    var result = try scanner.scan(allocator, io, .{ .port = opts.port, .protocol = opts.protocol });
+    const filter = opts.scanFilter();
+    var result = try scanner.scan(allocator, io, filter);
     defer result.deinit();
 
     if (opts.json) {
@@ -82,8 +83,13 @@ fn runList(
         }
     }
 
-    if (opts.port != null and result.entries.len == 0) {
-        try stderr.print("zport: no process found using port {d}\n", .{opts.port.?});
+    if (filter.hasPortFilter() and result.entries.len == 0) {
+        const ports = opts.requestedPorts();
+        if (ports.count == 1) {
+            try stderr.print("zport: no process found using port {d}\n", .{ports.first().?});
+        } else {
+            try stderr.writeAll("zport: no process found using requested ports\n");
+        }
         return .no_match;
     }
     return .ok;
@@ -109,7 +115,9 @@ test "list command uses scanner seam and reports filtered misses" {
     var err = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer err.deinit();
 
-    const code = try runList(source.scanner(), std.testing.allocator, std.testing.io, &out.writer, &err.writer, .{ .port = 4000 });
+    var ports: model.PortSet = .{};
+    ports.add(4000);
+    const code = try runList(source.scanner(), std.testing.allocator, std.testing.io, &out.writer, &err.writer, .{ .port = 4000, .ports = ports });
 
     try std.testing.expectEqual(cli.ExitCode.no_match, code);
     try std.testing.expect(std.mem.indexOf(u8, err.written(), "no process found using port 4000") != null);

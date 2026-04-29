@@ -35,17 +35,41 @@ pub const Action = union(enum) {
 
 pub const ListOptions = struct {
     port: ?u16 = null,
+    ports: model.PortSet = .{},
     protocol: ?model.Protocol = null,
     json: bool = false,
     no_header: bool = false,
+
+    pub fn requestedPorts(self: ListOptions) model.PortSet {
+        var ports = self.ports;
+        if (ports.isEmpty()) {
+            if (self.port) |port| ports.add(port);
+        }
+        return ports;
+    }
+
+    pub fn scanFilter(self: ListOptions) model.ScanFilter {
+        return model.ScanFilter.fromPorts(self.requestedPorts(), self.protocol);
+    }
 };
 
 pub const KillOptions = struct {
     port: u16,
+    ports: model.PortSet = .{},
     protocol: ?model.Protocol = null,
     signal: KillSignal = .term,
     dry_run: bool = false,
     wait_ms: u32 = 1000,
+
+    pub fn requestedPorts(self: KillOptions) model.PortSet {
+        var ports = self.ports;
+        if (ports.isEmpty()) ports.add(self.port);
+        return ports;
+    }
+
+    pub fn scanFilter(self: KillOptions) model.ScanFilter {
+        return model.ScanFilter.fromPorts(self.requestedPorts(), self.protocol);
+    }
 };
 
 pub const Config = struct {
@@ -56,9 +80,9 @@ pub const ParseError = error{Usage};
 
 pub const usage =
     \\Usage:
-    \\  zport [OPTIONS] [PORT]
-    \\  zport list [OPTIONS] [PORT]
-    \\  zport kill [OPTIONS] PORT
+    \\  zport [OPTIONS] [PORT ...]
+    \\  zport list [OPTIONS] [PORT ...]
+    \\  zport kill [OPTIONS] PORT ...
     \\
     \\Options:
     \\  --tcp                 Show TCP only
@@ -119,6 +143,7 @@ fn parseList(args: []const []const u8) ParseError!ListOptions {
 
     return .{
         .port = shared.port,
+        .ports = shared.ports,
         .protocol = shared.protocol,
         .json = json,
         .no_header = no_header,
@@ -160,6 +185,7 @@ fn parseKill(args: []const []const u8) ParseError!KillOptions {
 
     return .{
         .port = try shared.requirePort(),
+        .ports = shared.ports,
         .protocol = shared.protocol,
         .signal = signal,
         .dry_run = dry_run,
@@ -189,11 +215,13 @@ const ArgParser = struct {
 
 const SharedOptions = struct {
     port: ?u16 = null,
+    ports: model.PortSet = .{},
     protocol: ?model.Protocol = null,
 
     fn setPort(self: *SharedOptions, value: []const u8) ParseError!void {
-        if (self.port != null) return error.Usage;
-        self.port = try parsePort(value);
+        const parsed = try parsePort(value);
+        if (self.port == null) self.port = parsed;
+        self.ports.add(parsed);
     }
 
     fn requirePort(self: SharedOptions) ParseError!u16 {
@@ -257,12 +285,26 @@ test "parses list defaults and filters" {
     try std.testing.expect((try parse(&.{"--json"})).action.list.json);
 }
 
+test "parses multiple list ports" {
+    const cfg = try parse(&.{ "3000", "4000" });
+    try std.testing.expect(cfg.action.list.ports.contains(3000));
+    try std.testing.expect(cfg.action.list.ports.contains(4000));
+    try std.testing.expectEqual(@as(usize, 2), cfg.action.list.ports.count);
+}
+
 test "parses kill options" {
     const cfg = try parse(&.{ "kill", "3000", "--force", "--dry-run", "--wait", "50" });
     try std.testing.expectEqual(@as(u16, 3000), cfg.action.kill.port);
     try std.testing.expectEqual(KillSignal.kill, cfg.action.kill.signal);
     try std.testing.expect(cfg.action.kill.dry_run);
     try std.testing.expectEqual(@as(u32, 50), cfg.action.kill.wait_ms);
+}
+
+test "parses multiple kill ports" {
+    const cfg = try parse(&.{ "kill", "3000", "4000", "--dry-run" });
+    try std.testing.expect(cfg.action.kill.ports.contains(3000));
+    try std.testing.expect(cfg.action.kill.ports.contains(4000));
+    try std.testing.expectEqual(@as(usize, 2), cfg.action.kill.ports.count);
 }
 
 test "rejects invalid arguments" {
